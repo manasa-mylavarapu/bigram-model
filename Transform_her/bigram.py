@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 
-with open('/Users/manasa.mylavarapu/Desktop/AK_Practice/input.txt', 'r') as f:
+with open('/Users/manasa.mylavarapu/Desktop/AK_Practice/Transform_her/input.txt', 'r') as f:
     text = f.read()
 
 chars = sorted(set(text))

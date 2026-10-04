@@ -1,0 +1,189 @@
+Here are my doubts and the answers i thought are convincing:
+
+------------------------------- 1st QnA start --------------------------------------
+Q:
+see i get it hat m is an object created for the class bigranlanguagemodel but what does m(xb) mean? 
+like we are passing xb of shape [4,8] to m object? where is it being passed and which method is calling it?
+
+
+Ans:
+When you do `m(xb)`, you are calling the object `m` __as if it were a function__.
+
+Here is exactly what is happening under the hood, step-by-step:
+
+---
+
+### 1. In Python: Calling an Object Invokes `__call__`
+
+In Python, whenever you put parentheses after an object—like `m(...)`—Python looks for a special method on that class named `__call__`:
+
+```python
+m(xb)   # Python translates this to: m.__call__(xb)
+```
+
+---
+
+### 2. In PyTorch: `nn.Module` Defines `__call__`
+
+Notice how your class inherits from `nn.Module`:
+
+```python
+class BigramLanguageModel(nn.Module):
+    ...
+```
+
+`torch.nn.Module` already comes with a built-in implementation of `__call__`.
+
+When you run `m(xb)`, PyTorch's `nn.Module.__call__` runs. It does some internal bookkeeping (such as registering forward hooks, profiling, etc.) and then __calls your `forward` method__:
+
+```javascript
+m(xb) 
+  └──> nn.Module.__call__(self, xb)
+         └──> BigramLanguageModel.forward(self, idx=xb)
+```
+
+---
+
+### 3. Where `xb` Lands in Your Code
+
+In your `transform_me.py`, you defined:
+
+```python
+def forward(self, idx):
+    logits = self.token_embedding_table(idx)
+    return logits
+```
+
+When you pass `xb` into `m(xb)`:
+
+- `xb` of shape `[4, 8]` is passed as the argument __`idx`__ into `forward(self, idx)`.
+- Inside `forward`, `idx` has shape `(batch_size=4, block_size=8)`.
+
+---
+
+### 4. What Happens to the Shape `[4, 8]` Inside?
+
+`self.token_embedding_table` is:
+
+```python
+nn.Embedding(vocab_size, vocab_size)
+```
+
+- It acts like a lookup table / matrix of shape `[vocab_size, vocab_size]`.
+- For each token ID in `idx` (each integer in your `[4, 8]` matrix), it retrieves a vector of length `vocab_size`.
+- The output `logits` therefore has shape: $$\text{shape} = [4, 8, \text{vocab_size}] \quad (B, T, C)$$ *(Batch=4, Time/Block=8, Channels/Vocab_size)*
+------------------------------- 1st QnA end --------------------------------------
+------------------------------- 2nd QnA start --------------------------------------
+Q:
+m(xb) 
+  └──> nn.Module.__call__(self, xb)
+         └──> BigramLanguageModel.forward(self, idx=xb)
+how does pytorch even know i have defined something like  forward in my class? 
+i can write. method blabla alos. then how does it know which method to call? 
+
+How does PyTorch know to call `forward` and not `blabla`?
+
+Ans:
+It isn't magic or mind-reading—it is __hardcoded inside PyTorch’s source code__ as an Object-Oriented Programming (OOP) contract.
+
+When you write:
+
+```python
+class BigramLanguageModel(nn.Module):
+    def forward(self, idx):
+        ...
+```
+
+You are inheriting from `nn.Module`. Inside PyTorch's actual source code for `nn.Module`, the `__call__` method looks roughly like this:
+
+```python
+# Simplified view inside PyTorch's nn.Module source code:
+class Module:
+    def __call__(self, *args, **kwargs):
+        # 1. Run any pre-hooks (logging, debugging, etc.)
+        
+        # 2. CALL THE METHOD LITERALLY NAMED "forward":
+        result = self.forward(*args, **kwargs)
+        
+        # 3. Run any post-hooks
+        return result
+
+    def forward(self, *args, **kwargs):
+        # If you forgot to define 'forward' in your class, raise this:
+        raise NotImplementedError
+```
+
+Because your class is a child of `nn.Module`, `self` is your `BigramLanguageModel` instance.
+
+- When `self.forward(...)` runs, Python looks for a method specifically spelled __`forward`__ on your class.
+
+- If you had named your method `def blabla(self, idx):`, PyTorch wouldn't know or care about `blabla`. It would still look for `forward`, fail to find it in your class, fall back to the base class, and crash with:
+
+  ```javascript
+  NotImplementedError: Module [BigramLanguageModel] is missing the required "forward" function
+  ```
+
+__`forward` is a strict convention/rule set by PyTorch.__ If you inherit from `nn.Module`, you __must__ name your main computation method `forward`.
+------------------------------- 2nd QnA end --------------------------------------
+------------------------------- 3rd QnA start --------------------------------------
+
+def generate(self, idx, max_new_tokens):
+        for _ in range(max_new_tokens):
+            logits, loss = self(idx) # logits (B, T,C)
+            probs = F.softmax(logits[:, -1, :], dim = -1) #probs (B,C)
+            idx_next = torch.multinomial(probs, num_samples=1) 
+            idx = torch.cat((idx, idx_next), dim = 1)
+            
+        return idx
+
+Q:
+In the above function, why use torch.multinomial and not argmax?
+
+Ans:
+
+Taking the highest probability every time is called __greedy decoding__ (`torch.argmax`).
+
+While using `torch.argmax` is mathematically valid and commonly used in some tasks (like code generation or math), relying *only* on `argmax` for general text generation leads to three major problems:
+
+---
+
+### 1. The Repetition Trap (Loops)
+
+Greedy decoding is notorious for getting stuck in infinite, repetitive loops.
+
+Imagine the model generates:
+
+> *"The quick brown fox jumps over the dog and the dog and the dog and the dog..."*
+
+Why does this happen?
+
+- If the token with the highest probability after `"dog"` happens to be `" and"`, and the highest probability after `" and"` is `" the"`, and after `" the"` is `" dog"`:
+- `argmax` is $100%$ deterministic. It will pick those exact tokens forever.
+- With `torch.multinomial` (sampling), even if `" and"` has a $60%$ chance and `" who"` has a $25%$ chance, there is a chance the model samples `" who"`, escaping the loop naturally.
+
+---
+
+### 2. Lack of Variety / Creativity
+
+Language is rarely deterministic. For example, consider the incomplete sentence:
+
+> *"Today the weather is very..."*
+
+The probabilities might look like:
+
+- `'nice'` : $35%$
+- `'cold'` : $30%$
+- `'hot'` : $20%$
+- `'humid'`: $15%$
+
+If you use `argmax`:
+
+- Every single time you run the model on this sentence, it will __always__ say `"nice"`.
+- It will never produce `"cold"`, `"hot"`, or `"humid"`, even though those are perfectly valid and natural English continuations.
+
+With `torch.multinomial`, the model explores different plausible continuations proportional to their likelihood:
+
+- About $35%$ of the time it says `"nice"`
+- About $30%$ of the time it says `"cold"`
+- About $20%$ of the time it says `"hot"`
+------------------------------- 3rd QnA end --------------------------------------
